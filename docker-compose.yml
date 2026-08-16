@@ -1,0 +1,22 @@
+services:
+  postgres-user:
+    image: postgres:16
+    container_name: chat-alpha-user-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: chat_alpha_users
+    ports:
+      - '5433:5432'
+    volumes:
+      - user_pgdata:/var/lib/postgresql/data
+    networks:
+      - chat-alpha-network
+
+volumes:
+  user_pgdata:
+
+networks:
+  chat-alpha-network:
+    external: true
