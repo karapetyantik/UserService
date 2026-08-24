@@ -1,98 +1,158 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# UserService — документация
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+Микросервис управления профилями пользователей на базе NestJS. Отвечает за создание профиля при регистрации пользователя (реагируя на событие из очереди сообщений), получение профиля текущего пользователя и его обновление, с кешированием в Redis.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+---
 
-## Description
+## 1. Общее описание
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+Сервис состоит из двух основных классов:
 
-## Project setup
+- **`ProfileController`** — HTTP/микросервисный контроллер, обрабатывающий как обычные REST-запросы (`GET`, `PATCH`), так и события из брокера сообщений (`@EventPattern`).
+- **`ProfileService`** — бизнес-логика: создание, чтение (с кешем) и обновление профиля.
 
-```bash
-$ npm install
+Сервис является получателем события `user.registered`, которое публикует `AuthService` при регистрации пользователя (см. документацию `AuthService`, метод `register`). Это классическая событийно-ориентированная интеграция между микросервисами: `Auth`-сервис владеет учётными данными, `User`-сервис — расширенным профилем.
+
+### 1.1. Зависимости
+
+| Зависимость | Назначение |
+|---|---|
+| `PrismaService` | Доступ к БД, модель `profile` |
+| `RedisService` | Кеширование профиля (`GET`/`SET`/`DEL`) |
+| `Logger` (`@nestjs/common`) | Логирование создания профилей и предупреждений |
+
+### 1.2. Транспорт
+
+- `@Controller('users')` — REST-эндпоинты под префиксом `/users`.
+- `@EventPattern('user.registered')` — обработчик события из микросервисного транспорта (например, RabbitMQ), настроенного в NestJS-приложении. В отличие от `@MessagePattern`, `@EventPattern` не предполагает ответа отправителю (fire-and-forget).
+
+---
+
+## 2. `ProfileController`
+
+### 2.1. `GET /users/me` — `getMe(req)`
+
+- **Guard:** `JwtAuthGuard` — требует валидный access-токен.
+- Возвращает профиль текущего авторизованного пользователя, извлекая `userId` из `req.user` (payload JWT, установленный guard'ом).
+- Делегирует вызов `profileService.getProfile(req.user.userId)`.
+
+### 2.2. `EventPattern('user.registered')` — `handleUserRegistered(data)`
+
+- Не HTTP-эндпоинт, а подписчик на событие в очереди сообщений.
+- Payload: `{ userId, email, username }` — ровно те поля, которые публикует `AuthService.register()`.
+- Вызывает `profileService.createProfile(data)`, тем самым асинхронно создавая профиль сразу после регистрации пользователя в Auth-сервисе.
+- Метод `async`, но результат не возвращается брокеру (fire-and-forget семантика `@EventPattern`).
+
+### 2.3. `PATCH /users/me` — `updateMe(req, dto)`
+
+- **Guard:** `JwtAuthGuard`.
+- Принимает `UpdateProfileDto` в теле запроса.
+- Делегирует `profileService.updateProfile(req.user.userId, dto)`.
+
+---
+
+## 3. `ProfileService`
+
+### 3.1. `createProfile(data: { userId, email, username }): Promise<void>`
+
+Идемпотентное создание профиля, вызывается обработчиком события `user.registered`.
+
+**Логика:**
+1. Проверяет, существует ли уже профиль с данным `userId`.
+2. Если существует — логирует предупреждение (`Logger.warn`) и завершает выполнение без ошибки. Это делает обработчик устойчивым к повторной доставке события (at-least-once delivery), характерной для брокеров сообщений вроде RabbitMQ.
+3. Если не существует — создаёт запись `profile` с полями `userId`, `email`, `username`.
+4. Логирует успешное создание (`Logger.log`).
+
+**Возвращаемое значение:** `void` — метод не возвращает данные, так как вызывается асинхронным обработчиком события, а не HTTP-запросом.
+
+### 3.2. `getProfile(userId: string): Promise<Profile>`
+
+Получение профиля с использованием кеша Redis по паттерну **cache-aside**.
+
+**Логика:**
+1. Формирует ключ кеша и пытается прочитать значение из Redis.
+2. При наличии кеша — парсит JSON и возвращает результат немедленно (без обращения к БД).
+3. При отсутствии кеша — ищет профиль в БД по `userId`.
+4. Если профиль не найден — `NotFoundException('Профиль не найден')`.
+5. Если найден — сохраняет сериализованный профиль в Redis с TTL 300 секунд (5 минут) и возвращает его.
+
+**Исключения:**
+- `NotFoundException` — профиль не найден ни в кеше, ни в БД.
+
+### 3.3. `updateProfile(userId: string, dto: UpdateProfileDto): Promise<Profile>`
+
+Обновление данных профиля с инвалидацией кеша.
+
+**Логика:**
+1. Проверяет, что профиль существует — иначе `NotFoundException('Profile not found')`.
+2. Обновляет запись в БД данными из `dto` (частичное обновление, все поля `dto` применяются как есть).
+3. Удаляет запись из кеша Redis, чтобы следующий `getProfile` перечитал актуальные данные из БД.
+4. Возвращает обновлённый профиль.
+
+---
+
+## 4. Используемые ключи Redis
+
+| Ключ (как задуман) | Формируется в | TTL |
+|---|---|---|
+| `profile:{userId}` | `getProfile` (кладёт и читает) | 300 сек |
+| `profile:{userId}` | `updateProfile` (должен удалять) | — |
+
+См. раздел 5 — фактически используемые в коде строки ключей **не совпадают** с задуманными и друг с другом.
+
+---
+
+## 5. Обнаруженные проблемы в текущей реализации
+
+Эти замечания важны для корректной работы кеша — сейчас он фактически не инвалидируется правильно.
+
+1. **Опечатка в имени переменной и лишний `$` в ключе кеша (`getProfile`).**
+   ```ts
+   const cacheKay = `profile:$${userId}`;
+   ```
+   Здесь `$${userId}` — это литеральный символ `$`, за которым следует подставленное значение `userId` (а не экранированный `${userId}`). В результате реальный ключ в Redis выглядит как `profile:$123`, а не `profile:123`, как, судя по всему, задумывалось. Само по себе это не ломает `getProfile` (ключ используется последовательно), но создаёт путаницу и делает следующую проблему более явной.
+
+2. **Ключ инвалидации в `updateProfile` не совпадает с ключом записи в `getProfile`.**
+   ```ts
+   await this.redisService.client.del(`prodile:${userId}`);
+   ```
+   Здесь опечатка `prodile` вместо `profile`, а также отсутствует лишний `$` из `getProfile`. В итоге `updateProfile` удаляет несуществующий ключ `prodile:{userId}`, а реальный кеш `profile:${userId}` (с лишним `$`) **не инвалидируется**.
+
+   **Практическое следствие:** после `PATCH /users/me` пользователь до 5 минут (TTL) может получать через `GET /users/me` устаревшие данные из кеша. Это баг, который стоит исправить в первую очередь — например, унифицировав формирование ключа в отдельный приватный метод (`private cacheKey(userId: string) { return \`profile:${userId}\`; }`) и используя его в обоих местах.
+
+3. **Разные сообщения об ошибке `NotFoundException` в `getProfile` и `updateProfile`** («Профиль не найден» на русском против «Profile not found» на английском) — стоит унифицировать язык сообщений, как и в `AuthService`, где также смешаны русские сообщения об ошибках без i18n-слоя.
+
+4. **`createProfile` не валидирует входные данные события.** Поскольку `data` приходит из очереди сообщений (а не из проверяемого `class-validator` DTO, как в HTTP-контроллерах), при повреждённом или неполном payload (например, из-за рассинхронизации версий с `AuthService`) `prismaService.profile.create` может упасть с ошибкой уровня БД вместо контролируемого исключения. Возможно, стоит добавить явную проверку обязательных полей перед созданием записи.
+
+5. **Отсутствие обработки ошибок соединения с Redis.** Если Redis временно недоступен, `getProfile` упадёт с необработанным исключением при попытке чтения кеша, хотя логически сервис мог бы продолжить работу напрямую через БД (graceful degradation). Сейчас это не реализовано ни здесь, ни, судя по всему, в `AuthService`.
+
+---
+
+## 6. Взаимодействие с другими сервисами
+
+```
+AuthService.register()
+        │
+        │  emit 'user.registered' { userId, email, username }
+        ▼
+   [ message broker ]
+        │
+        ▼
+ProfileController.handleUserRegistered()
+        │
+        ▼
+ProfileService.createProfile()  →  создаёт запись profile в БД
 ```
 
-## Compile and run the project
+- Создание профиля происходит **асинхронно** относительно ответа на `POST /auth/register` — клиент получает успешный ответ регистрации до того, как профиль фактически будет создан. Между этими двумя моментами возможен короткий промежуток времени (race condition), в течение которого `GET /users/me` вернёт `404 Profile not found`, если пользователь успеет авторизоваться сразу после регистрации до обработки события.
+- `getProfile`/`updateProfile` полагаются на то, что `req.user.userId` (из JWT, выданного `AuthService`) совпадает с полем `userId` в модели `profile` — то есть оба сервиса используют единое пространство идентификаторов пользователя.
 
-```bash
-# development
-$ npm run start
+---
 
-# watch mode
-$ npm run start:dev
+## 7. Эндпоинты (сводная таблица)
 
-# production mode
-$ npm run start:prod
-```
-
-## Run tests
-
-```bash
-# unit tests
-$ npm run test
-
-# e2e tests
-$ npm run test:e2e
-
-# test coverage
-$ npm run test:cov
-```
-
-## Deployment
-
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
-
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
-
-```bash
-$ npm install -g @nestjs/mau
-$ mau deploy
-```
-
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+| Метод сервиса | Тип | Роут / событие | Guard |
+|---|---|---|---|
+| `getProfile` | HTTP GET | `/users/me` | `JwtAuthGuard` |
+| `createProfile` | Event | `user.registered` | — |
+| `updateProfile` | HTTP PATCH | `/users/me` | `JwtAuthGuard` |
