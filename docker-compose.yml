@@ -1,3 +1,4 @@
+name: chat-alpha-user
 services:
   postgres-user:
     image: postgres:16
@@ -16,6 +17,7 @@ services:
 
 volumes:
   user_pgdata:
+    name: userservice_user_pgdata
 
 networks:
   chat-alpha-network:
