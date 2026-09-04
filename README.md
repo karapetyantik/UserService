@@ -1,158 +1,161 @@
-# UserService — документация
+# UserService — подробная документация (все файлы)
 
-Микросервис управления профилями пользователей на базе NestJS. Отвечает за создание профиля при регистрации пользователя (реагируя на событие из очереди сообщений), получение профиля текущего пользователя и его обновление, с кешированием в Redis.
-
----
-
-## 1. Общее описание
-
-Сервис состоит из двух основных классов:
-
-- **`ProfileController`** — HTTP/микросервисный контроллер, обрабатывающий как обычные REST-запросы (`GET`, `PATCH`), так и события из брокера сообщений (`@EventPattern`).
-- **`ProfileService`** — бизнес-логика: создание, чтение (с кешем) и обновление профиля.
-
-Сервис является получателем события `user.registered`, которое публикует `AuthService` при регистрации пользователя (см. документацию `AuthService`, метод `register`). Это классическая событийно-ориентированная интеграция между микросервисами: `Auth`-сервис владеет учётными данными, `User`-сервис — расширенным профилем.
-
-### 1.1. Зависимости
-
-| Зависимость | Назначение |
-|---|---|
-| `PrismaService` | Доступ к БД, модель `profile` |
-| `RedisService` | Кеширование профиля (`GET`/`SET`/`DEL`) |
-| `Logger` (`@nestjs/common`) | Логирование создания профилей и предупреждений |
-
-### 1.2. Транспорт
-
-- `@Controller('users')` — REST-эндпоинты под префиксом `/users`.
-- `@EventPattern('user.registered')` — обработчик события из микросервисного транспорта (например, RabbitMQ), настроенного в NestJS-приложении. В отличие от `@MessagePattern`, `@EventPattern` не предполагает ответа отправителю (fire-and-forget).
+Микросервис профилей пользователей. Хранилище — PostgreSQL через Prisma. Создаёт профиль при регистрации пользователя (слушая событие `user.registered` от `AuthService`), отдаёт и обновляет профиль текущего пользователя, обновляет URL аватара по событию от `MediaService`.
 
 ---
 
-## 2. `ProfileController`
-
-### 2.1. `GET /users/me` — `getMe(req)`
-
-- **Guard:** `JwtAuthGuard` — требует валидный access-токен.
-- Возвращает профиль текущего авторизованного пользователя, извлекая `userId` из `req.user` (payload JWT, установленный guard'ом).
-- Делегирует вызов `profileService.getProfile(req.user.userId)`.
-
-### 2.2. `EventPattern('user.registered')` — `handleUserRegistered(data)`
-
-- Не HTTP-эндпоинт, а подписчик на событие в очереди сообщений.
-- Payload: `{ userId, email, username }` — ровно те поля, которые публикует `AuthService.register()`.
-- Вызывает `profileService.createProfile(data)`, тем самым асинхронно создавая профиль сразу после регистрации пользователя в Auth-сервисе.
-- Метод `async`, но результат не возвращается брокеру (fire-and-forget семантика `@EventPattern`).
-
-### 2.3. `PATCH /users/me` — `updateMe(req, dto)`
-
-- **Guard:** `JwtAuthGuard`.
-- Принимает `UpdateProfileDto` в теле запроса.
-- Делегирует `profileService.updateProfile(req.user.userId, dto)`.
-
----
-
-## 3. `ProfileService`
-
-### 3.1. `createProfile(data: { userId, email, username }): Promise<void>`
-
-Идемпотентное создание профиля, вызывается обработчиком события `user.registered`.
-
-**Логика:**
-1. Проверяет, существует ли уже профиль с данным `userId`.
-2. Если существует — логирует предупреждение (`Logger.warn`) и завершает выполнение без ошибки. Это делает обработчик устойчивым к повторной доставке события (at-least-once delivery), характерной для брокеров сообщений вроде RabbitMQ.
-3. Если не существует — создаёт запись `profile` с полями `userId`, `email`, `username`.
-4. Логирует успешное создание (`Logger.log`).
-
-**Возвращаемое значение:** `void` — метод не возвращает данные, так как вызывается асинхронным обработчиком события, а не HTTP-запросом.
-
-### 3.2. `getProfile(userId: string): Promise<Profile>`
-
-Получение профиля с использованием кеша Redis по паттерну **cache-aside**.
-
-**Логика:**
-1. Формирует ключ кеша и пытается прочитать значение из Redis.
-2. При наличии кеша — парсит JSON и возвращает результат немедленно (без обращения к БД).
-3. При отсутствии кеша — ищет профиль в БД по `userId`.
-4. Если профиль не найден — `NotFoundException('Профиль не найден')`.
-5. Если найден — сохраняет сериализованный профиль в Redis с TTL 300 секунд (5 минут) и возвращает его.
-
-**Исключения:**
-- `NotFoundException` — профиль не найден ни в кеше, ни в БД.
-
-### 3.3. `updateProfile(userId: string, dto: UpdateProfileDto): Promise<Profile>`
-
-Обновление данных профиля с инвалидацией кеша.
-
-**Логика:**
-1. Проверяет, что профиль существует — иначе `NotFoundException('Profile not found')`.
-2. Обновляет запись в БД данными из `dto` (частичное обновление, все поля `dto` применяются как есть).
-3. Удаляет запись из кеша Redis, чтобы следующий `getProfile` перечитал актуальные данные из БД.
-4. Возвращает обновлённый профиль.
-
----
-
-## 4. Используемые ключи Redis
-
-| Ключ (как задуман) | Формируется в | TTL |
-|---|---|---|
-| `profile:{userId}` | `getProfile` (кладёт и читает) | 300 сек |
-| `profile:{userId}` | `updateProfile` (должен удалять) | — |
-
-См. раздел 5 — фактически используемые в коде строки ключей **не совпадают** с задуманными и друг с другом.
-
----
-
-## 5. Обнаруженные проблемы в текущей реализации
-
-Эти замечания важны для корректной работы кеша — сейчас он фактически не инвалидируется правильно.
-
-1. **Опечатка в имени переменной и лишний `$` в ключе кеша (`getProfile`).**
-   ```ts
-   const cacheKay = `profile:$${userId}`;
-   ```
-   Здесь `$${userId}` — это литеральный символ `$`, за которым следует подставленное значение `userId` (а не экранированный `${userId}`). В результате реальный ключ в Redis выглядит как `profile:$123`, а не `profile:123`, как, судя по всему, задумывалось. Само по себе это не ломает `getProfile` (ключ используется последовательно), но создаёт путаницу и делает следующую проблему более явной.
-
-2. **Ключ инвалидации в `updateProfile` не совпадает с ключом записи в `getProfile`.**
-   ```ts
-   await this.redisService.client.del(`prodile:${userId}`);
-   ```
-   Здесь опечатка `prodile` вместо `profile`, а также отсутствует лишний `$` из `getProfile`. В итоге `updateProfile` удаляет несуществующий ключ `prodile:{userId}`, а реальный кеш `profile:${userId}` (с лишним `$`) **не инвалидируется**.
-
-   **Практическое следствие:** после `PATCH /users/me` пользователь до 5 минут (TTL) может получать через `GET /users/me` устаревшие данные из кеша. Это баг, который стоит исправить в первую очередь — например, унифицировав формирование ключа в отдельный приватный метод (`private cacheKey(userId: string) { return \`profile:${userId}\`; }`) и используя его в обоих местах.
-
-3. **Разные сообщения об ошибке `NotFoundException` в `getProfile` и `updateProfile`** («Профиль не найден» на русском против «Profile not found» на английском) — стоит унифицировать язык сообщений, как и в `AuthService`, где также смешаны русские сообщения об ошибках без i18n-слоя.
-
-4. **`createProfile` не валидирует входные данные события.** Поскольку `data` приходит из очереди сообщений (а не из проверяемого `class-validator` DTO, как в HTTP-контроллерах), при повреждённом или неполном payload (например, из-за рассинхронизации версий с `AuthService`) `prismaService.profile.create` может упасть с ошибкой уровня БД вместо контролируемого исключения. Возможно, стоит добавить явную проверку обязательных полей перед созданием записи.
-
-5. **Отсутствие обработки ошибок соединения с Redis.** Если Redis временно недоступен, `getProfile` упадёт с необработанным исключением при попытке чтения кеша, хотя логически сервис мог бы продолжить работу напрямую через БД (graceful degradation). Сейчас это не реализовано ни здесь, ни, судя по всему, в `AuthService`.
-
----
-
-## 6. Взаимодействие с другими сервисами
+## 1. Дерево модуля
 
 ```
-AuthService.register()
-        │
-        │  emit 'user.registered' { userId, email, username }
-        ▼
-   [ message broker ]
-        │
-        ▼
-ProfileController.handleUserRegistered()
-        │
-        ▼
-ProfileService.createProfile()  →  создаёт запись profile в БД
+src/
+├── main.ts
+├── app.module.ts / app.controller.ts / app.service.ts
+├── auth/        (jwt.strategy.ts, jwt-auth.guard.ts, auth.module.ts — только валидация JWT, не выпуск)
+├── prisma/      (prisma.module.ts, prisma.service.ts)
+├── redis/       (redis.module.ts, redis.service.ts)
+└── profile/
+    ├── profile.module.ts
+    ├── profile.controller.ts          — REST (/users/*) + событие user.registered
+    ├── profile-events.controller.ts   — событие avatar.updated
+    ├── profile.service.ts
+    └── dto/update-profile.dto.ts
 ```
-
-- Создание профиля происходит **асинхронно** относительно ответа на `POST /auth/register` — клиент получает успешный ответ регистрации до того, как профиль фактически будет создан. Между этими двумя моментами возможен короткий промежуток времени (race condition), в течение которого `GET /users/me` вернёт `404 Profile not found`, если пользователь успеет авторизоваться сразу после регистрации до обработки события.
-- `getProfile`/`updateProfile` полагаются на то, что `req.user.userId` (из JWT, выданного `AuthService`) совпадает с полем `userId` в модели `profile` — то есть оба сервиса используют единое пространство идентификаторов пользователя.
 
 ---
 
-## 7. Эндпоинты (сводная таблица)
+## 2. `main.ts` — точка входа
 
-| Метод сервиса | Тип | Роут / событие | Guard |
+- Глобальный `ValidationPipe({ whitelist: true, forbidNonWhitelisted: true })`.
+- **В отличие от `AuthService`, этот сервис — не только HTTP-сервер, но и микросервис-консьюмер:** `app.connectMicroservice({ transport: Transport.RMQ, options: { urls: [RABBITMQ_URL], queue: 'user_events', queueOptions: { durable: true } } })`, затем `app.startAllMicroservices()`.
+- Слушает ту же очередь `user_events`, в которую `AuthService` публикует `user.registered` — таким образом `UserService` получает событие о регистрации асинхронно.
+- HTTP-порт — `PORT`, по умолчанию `3001`.
+
+**Важно:** событие `avatar.updated` (обрабатываемое `ProfileEventsController`) публикуется `MediaService` в очередь **`user_events`** (см. документацию `MediaService`, `MediaModule` регистрирует клиент `USER_EVENTS_SERVICE` на очередь `user_events`) — то есть `UserService` слушает единственную очередь `user_events`, из которой разбирает оба типа событий (`user.registered` и `avatar.updated`) по паттерну (`@EventPattern`).
+
+## 3. `app.module.ts`
+
+Импортирует `ConfigModule` (global), `PrismaModule`, `ProfileModule`, `AuthModule`, `RedisModule`. Собственных guard'ов на уровне приложения не регистрирует (в отличие от `AuthService`, здесь нет глобального `ThrottlerGuard`).
+
+## 4. `auth/` — валидация JWT (без выпуска токенов)
+
+- `JwtStrategy` — идентична стратегии в `AuthService`/`ChatService` и т.д.: тот же секрет `JWT_SECRET`, тот же payload `{ userId: sub, email }`. Токены, выпущенные `AuthService`, валидны здесь без дополнительной синхронизации, так как секрет общий (задаётся одинаковой переменной окружения для всех сервисов).
+- `JwtAuthGuard` — обёртка `AuthGuard('jwt')`.
+- `AuthModule` этого сервиса регистрирует только `JwtStrategy` — здесь нет ни `JwtModule.registerAsync` (выпуска токенов), ни OAuth-стратегий: сервис умеет только **проверять** переданный токен.
+
+## 5. `prisma/`, `redis/`
+
+Идентичны по структуре и коду соответствующим модулям `AuthService` (тот же `PrismaPg`-адаптер, тот же `RedisService` на базе `ioredis`).
+
+## 6. `profile/dto/update-profile.dto.ts`
+
+```ts
+class UpdateProfileDto {
+  @IsOptional() @IsString() @MinLength(3) @MaxLength(32) username?: string;
+  @IsOptional() @IsString() avatarUrl?: string;
+  @IsOptional() @IsString() @MaxLength(160) bio?: string;
+}
+```
+
+- Все поля опциональны — `PATCH` поддерживает частичное обновление.
+- `avatarUrl` не проверяется как `@IsUrl()` — просто произвольная строка. Клиент теоретически может записать в `avatarUrl` что угодно через этот DTO, при этом реальное обновление аватара после загрузки медиафайла происходит **другим путём** — через событие `avatar.updated` (см. `profile-events.controller.ts`), минуя этот DTO. Наличие поля `avatarUrl` в `UpdateProfileDto` при этом создаёт два независимых пути изменения одного и того же значения (см. замечания).
+
+## 7. `profile/profile.module.ts`
+
+Импортирует `PrismaModule`, `RedisModule`. Providers: `ProfileService`. Controllers: **оба** — `ProfileController` (REST + `user.registered`) и `ProfileEventsController` (`avatar.updated`).
+
+## 8. `profile/profile.controller.ts` — REST + событие регистрации
+
+| Метод | Тип | Роут/событие | Guard |
 |---|---|---|---|
-| `getProfile` | HTTP GET | `/users/me` | `JwtAuthGuard` |
-| `createProfile` | Event | `user.registered` | — |
-| `updateProfile` | HTTP PATCH | `/users/me` | `JwtAuthGuard` |
+| `getMe` | HTTP GET | `/users/me` | `JwtAuthGuard` |
+| `handleUserRegistered` | Event | `user.registered` | — |
+| `updateMe` | HTTP PATCH | `/users/me` | `JwtAuthGuard` |
+
+Логика не изменилась относительно ранее задокументированной версии: `getMe`/`updateMe` делегируют в `ProfileService`, `handleUserRegistered` вызывает `createProfile`.
+
+## 9. `profile/profile-events.controller.ts` — событие обновления аватара (новый файл)
+
+```ts
+@Controller()
+export class ProfileEventsController {
+  @EventPattern('avatar.updated')
+  async handleAvatarUpdated(@Payload() data: { userId: string; avatarUrl: string }) {
+    await this.profileService.updateAvatarUrl(data.userId, data.avatarUrl);
+  }
+}
+```
+
+- Отдельный контроллер, вынесенный специально под события, не связанные напрямую с REST-путём `/users`.
+- Подписан на `avatar.updated`, публикуемое `MediaService.saveVariants()` после того, как `ImageProxyService` обработал загруженное изображение (обрезал/сгенерировал вариант `avatar`).
+
+## 10. `profile/profile.service.ts` — бизнес-логика
+
+### 10.1. `createProfile(data)`
+Идемпотентно: если профиль для `userId` уже есть — пропускает с предупреждением в лог; иначе создаёт `{ userId, email, username }`.
+
+### 10.2. `getProfile(userId)`
+Cache-aside чтение: ключ `` `profile:$${userId}` `` (обратите внимание на лишний литеральный `$` — см. раздел 12), TTL кеша 300 сек, `NotFoundException`, если профиля нет ни в кеше, ни в БД.
+
+### 10.3. `updateProfile(userId, dto)`
+Проверка существования профиля → `NotFoundException`, иначе — `prisma.profile.update` с данными `dto` целиком (включая, теоретически, `avatarUrl`, если клиент передал его через `PATCH /users/me` — см. замечания) → удаление кеша по ключу `` `prodile:${userId}` `` (опечатка `prodile`, см. раздел 12).
+
+### 10.4. `updateAvatarUrl(userId, avatarUrl)` — новый метод
+```ts
+async updateAvatarUrl(userId: string, avatarUrl: string) {
+  await this.prismaService.profile.update({ where: { userId }, data: { avatarUrl } });
+  await this.redisService.client.del(`profile:${userId}`);
+}
+```
+- Вызывается только из `ProfileEventsController.handleAvatarUpdated`, то есть только в ответ на событие `avatar.updated` из `MediaService`.
+- **Ключ инвалидации кеша здесь сформирован правильно** (`` `profile:${userId}` ``, без лишнего `$`), но он всё равно **не совпадает** с реальным ключом, который использует `getProfile` (`` `profile:$${userId}` ``) — см. раздел 12.
+
+---
+
+## 11. Модель данных (реконструкция)
+
+**`Profile`**
+| Поле | Комментарий |
+|---|---|
+| `userId` | PK / unique, совпадает с `User.id` из `AuthService` |
+| `email` | копия email на момент регистрации (денормализация между сервисами) |
+| `username` | то же |
+| `avatarUrl` | ссылка на файл аватара, обновляется двумя путями (см. замечания) |
+| `bio` | текстовое описание, до 160 символов |
+
+---
+
+## 12. Используемые ключи Redis и найденная проблема с кешем
+
+| Метод | Ключ, который реально используется в коде |
+|---|---|
+| `getProfile` (чтение и запись кеша) | `` `profile:$${userId}` `` — содержит **литеральный** символ `$` перед подставленным `userId` |
+| `updateProfile` (инвалидация) | `` `prodile:${userId}` `` — опечатка: `prodile` вместо `profile`, и без лишнего `$` |
+| `updateAvatarUrl` (инвалидация) | `` `profile:${userId}` `` — написан «правильно» (без опечатки и без лишнего `$`), но именно поэтому тоже **не совпадает** с ключом из `getProfile` |
+
+**Итог: три метода используют три разных строки ключа**, ни одна инвалидация не попадает в реальный кеш, записанный `getProfile`. Практическое следствие:
+
+- После `PATCH /users/me` (`updateProfile`) — устаревшие данные профиля могут отдаваться из кеша до 5 минут (TTL).
+- После получения события `avatar.updated` (`updateAvatarUrl`) — то же самое: обновлённый `avatarUrl` не долетит до `GET /users/me`, пока кеш `profile:$${userId}` не истечёт сам, до 5 минут.
+
+Исправление: вынести формирование ключа в один приватный метод (например, `private cacheKey(userId: string) { return \`profile:${userId}\`; }`) и использовать его во всех трёх местах.
+
+---
+
+## 13. Взаимодействие с другими сервисами (RabbitMQ)
+
+| Событие | Очередь | Источник | Обработчик здесь |
+|---|---|---|---|
+| `user.registered` | `user_events` | `AuthService` | `ProfileController.handleUserRegistered` → `createProfile` |
+| `avatar.updated` | `user_events` | `MediaService` (после обработки аватара `ImageProxyService`-ом) | `ProfileEventsController.handleAvatarUpdated` → `updateAvatarUrl` |
+
+`UserService` сам ничего не публикует — чистый подписчик обеих очередей событий, относящихся к пользователю.
+
+---
+
+## 14. Сводные замечания
+
+1. **Баг с несовпадающими ключами кеша** (см. раздел 12) — приоритетная проблема, кеш профиля фактически никогда не инвалидируется корректно.
+2. **Двойной путь изменения `avatarUrl`.** Поле `avatarUrl` присутствует и в `UpdateProfileDto` (клиент может передать его напрямую через `PATCH /users/me`), и обновляется отдельно через событие `avatar.updated` из `MediaService`. Если клиент отправит в `PATCH /users/me` собственное значение `avatarUrl`, оно перезапишет корректно сгенерированный URL из `MediaService`/`ImageProxyService` (например, ссылкой на несуществующий или произвольный файл), так как `avatarUrl` в `UpdateProfileDto` не проверяется на принадлежность реальному, подтверждённому медиафайлу пользователя. Стоит либо убрать `avatarUrl` из `UpdateProfileDto` (раз он должен управляться только через флоу загрузки аватара), либо валидировать его так же строго, как `MediaService` валидирует `mediaId` через `verifyMedia`.
+3. **`avatarUrl` не валидируется как URL** (`@IsString()`, а не `@IsUrl()`) — минорная недоработка валидации.
+4. **Разные тексты `NotFoundException`** («Профиль не найден» в `getProfile` vs `'Profile not found'` в `updateProfile`) — не унифицировано, как и в остальных сервисах системы.
+5. Сервис не имеет собственного глобального rate-limiting (`ThrottlerGuard`), в отличие от `AuthService` — `PATCH /users/me` не защищён от частых повторных вызовов на уровне этого сервиса.
