@@ -79,6 +79,12 @@
     "transform": {
       "^.+\\.(t|j)s$": "ts-jest"
     },
+    "moduleNameMapper": {
+      "^@auth/(.*)$": "<rootDir>/auth/$1",
+      "^@redis/(.*)$": "<rootDir>/redis/$1",
+      "^@db/(.*)$": "<rootDir>/prisma/$1",
+      "^@profile/(.*)$": "<rootDir>/profile/$1"
+    },
     "collectCoverageFrom": [
       "**/*.(t|j)s"
     ],

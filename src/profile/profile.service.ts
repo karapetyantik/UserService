@@ -1,7 +1,15 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
-import { PrismaService } from 'src/prisma/prisma.service';
-import { RedisService } from 'src/redis/redis.service';
+import { Prisma, Profile } from '@prisma/client';
+import { PrismaService } from '@db/prisma.service';
+import { RedisService } from '@redis/redis.service';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+
+const PROFILE_CACHE_TTL_SECONDS = 300;
+const PRISMA_UNIQUE_CONSTRAINT_ERROR = 'P2002';
+
+function profileCacheKey(userId: string): string {
+  return `profile:${userId}`;
+}
 
 @Injectable()
 export class ProfileService {
@@ -17,28 +25,34 @@ export class ProfileService {
     email: string;
     username: string;
   }) {
-    const existing = await this.prismaService.profile.findUnique({
-      where: { userId: data.userId },
-    });
-    if (existing) {
-      this.logger.warn(
-        `Профиль для userId=${data.userId} уже существует, пропускаем`,
-      );
-      return;
+    try {
+      await this.prismaService.profile.create({
+        data: {
+          userId: data.userId,
+          email: data.email,
+          username: data.username,
+        },
+      });
+      this.logger.log(`Профиль создан для userId=${data.userId}`);
+    } catch (error) {
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === PRISMA_UNIQUE_CONSTRAINT_ERROR
+      ) {
+        this.logger.warn(
+          `Профиль для userId=${data.userId} уже существует, пропускаем`,
+        );
+        return;
+      }
+      throw error;
     }
-
-    await this.prismaService.profile.create({
-      data: { userId: data.userId, email: data.email, username: data.username },
-    });
-
-    this.logger.log(`Профиль создан для userId=${data.userId}`);
   }
 
-  async getProfile(userId: string) {
-    const cacheKay = `profile:$${userId}`;
-    const cached = await this.redisService.client.get(cacheKay);
+  async getProfile(userId: string): Promise<Profile> {
+    const cacheKey = profileCacheKey(userId);
+    const cached = await this.redisService.client.get(cacheKey);
     if (cached) {
-      return JSON.parse(cached);
+      return JSON.parse(cached) as Profile;
     }
 
     const profile = await this.prismaService.profile.findUnique({
@@ -49,10 +63,10 @@ export class ProfileService {
     }
 
     await this.redisService.client.set(
-      cacheKay,
+      cacheKey,
       JSON.stringify(profile),
       'EX',
-      300,
+      PROFILE_CACHE_TTL_SECONDS,
     );
     return profile;
   }
@@ -70,7 +84,7 @@ export class ProfileService {
       data: dto,
     });
 
-    await this.redisService.client.del(`prodile:${userId}`);
+    await this.redisService.client.del(profileCacheKey(userId));
     return updated;
   }
 
@@ -79,6 +93,6 @@ export class ProfileService {
       where: { userId },
       data: { avatarUrl },
     });
-    await this.redisService.client.del(`profile:${userId}`);
+    await this.redisService.client.del(profileCacheKey(userId));
   }
 }
