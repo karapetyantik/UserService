@@ -1,8 +1,8 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { NotFoundException } from '@nestjs/common';
 import { ProfileService } from './profile.service';
-import { PrismaService } from '@db/prisma.service';
-import { RedisService } from '@redis/redis.service';
+import { PrismaService } from 'src/common/prisma/prisma.service';
+import { RedisService } from 'src/common/redis/redis.service';
 
 describe('ProfileService', () => {
   let service: ProfileService;

@@ -1,9 +1,9 @@
 import { Module } from '@nestjs/common';
 import { ProfileService } from './profile.service';
 import { ProfileController } from './profile.controller';
-import { PrismaModule } from '@db/prisma.module';
-import { RedisModule } from '@redis/redis.module';
 import { ProfileEventsController } from './profile-events.controller';
+import { PrismaModule } from '@common/prisma/prisma.module';
+import { RedisModule } from '@common/redis/redis.module';
 
 @Module({
   imports: [PrismaModule, RedisModule],

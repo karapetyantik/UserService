@@ -1,8 +1,8 @@
 import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { Prisma, Profile } from '@prisma/client';
-import { PrismaService } from '@db/prisma.service';
-import { RedisService } from '@redis/redis.service';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+import { PrismaService } from '@common/prisma/prisma.service';
+import { RedisService } from '@common/redis/redis.service';
 
 const PROFILE_CACHE_TTL_SECONDS = 300;
 const PRISMA_UNIQUE_CONSTRAINT_ERROR = 'P2002';

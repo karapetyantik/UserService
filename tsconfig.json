@@ -14,10 +14,8 @@
     "outDir": "./dist",
     "baseUrl": "./",
     "paths": {
-      "@auth/*": ["src/auth/*"],
-      "@redis/*": ["src/redis/*"],
-      "@db/*": ["src/prisma/*"],
-      "@profile/*": ["src/profile/*"]
+      "@common/*": ["src/common/*"],
+      "@modules/*": ["src/modules/*"]
     },
     "incremental": true,
     "skipLibCheck": true,
