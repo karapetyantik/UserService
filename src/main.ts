@@ -2,6 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { MicroserviceOptions, Transport } from '@nestjs/microservices';
 import { ConfigService } from '@nestjs/config';
+import { join } from 'path';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
@@ -18,6 +19,15 @@ async function bootstrap() {
       urls: [configService.getOrThrow<string>('RABBITMQ_URL')],
       queue: 'user_events',
       queueOptions: { durable: true },
+    },
+  });
+
+  app.connectMicroservice<MicroserviceOptions>({
+    transport: Transport.GRPC,
+    options: {
+      package: 'user',
+      protoPath: join(process.cwd(), 'dist/proto/user.proto'),
+      url: '0.0.0.0:5003',
     },
   });
 

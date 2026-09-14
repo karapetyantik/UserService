@@ -31,36 +31,50 @@ UserService не публикует событий сам — только по�
 
 ## API
 
-| Метод | Путь | Guard | Описание |
-|---|---|---|---|
-| `GET` | `/users/me` | `JwtAuthGuard` | Получить свой профиль (из кэша, если есть) |
-| `PATCH` | `/users/me` | `JwtAuthGuard` | Обновить `username` / `bio` / `avatarUrl` |
+| Метод   | Путь        | Guard          | Описание                                   |
+| ------- | ----------- | -------------- | ------------------------------------------ |
+| `GET`   | `/users/me` | `JwtAuthGuard` | Получить свой профиль (из кэша, если есть) |
+| `PATCH` | `/users/me` | `JwtAuthGuard` | Обновить `username` / `bio` / `avatarUrl`  |
 
 ### `PATCH /users/me`
 
 ```json
-{ "username": "alice", "bio": "hi there", "avatarUrl": "https://cdn.tapik.dev/avatars/u1.png" }
+{
+  "username": "alice",
+  "bio": "hi there",
+  "avatarUrl": "https://cdn.tapik.dev/avatars/u1.png"
+}
 ```
+
 Все поля опциональны. `avatarUrl` валидируется как настоящий URL (`@IsUrl()`).
 
 ## Потребляемые события RabbitMQ (очередь `user_events`)
 
-| Событие | Источник | Действие |
-|---|---|---|
-| `user.registered` | AuthService | Создаёт `Profile` (`userId`, `email`, `username`), если ещё не существует |
-| `avatar.updated` | MediaService | Обновляет `avatarUrl` профиля, инвалидирует кэш |
+| Событие           | Источник     | Действие                                                                  |
+| ----------------- | ------------ | ------------------------------------------------------------------------- |
+| `user.registered` | AuthService  | Создаёт `Profile` (`userId`, `email`, `username`), если ещё не существует |
+| `avatar.updated`  | MediaService | Обновляет `avatarUrl` профиля, инвалидирует кэш                           |
 
 Оба обработчика валидируют payload через `class-validator` DTO и оборачивают вызов сервиса в `try/catch` — ошибка обработки одного события логируется, но не роняет consumer.
 
+## Внутренний gRPC-сервер: `UserInternal`
+
+Proto: `src/proto/user.proto`. Защищён `InternalGrpcAuthGuard` — каждый вызов обязан нести metadata `x-internal-key`, совпадающий с `INTERNAL_API_KEY`.
+
+| RPC           | Вызывается кем     | Назначение                                                                                                                        |
+| ------------- | ------------------ | --------------------------------------------------------------------------------------------------------------------------------- |
+| `GetProfiles` | AIAssistantService | Пакетный резолвинг `username`/`avatarUrl` по списку `userId` (дайджест непрочитанных, поиск получателя по имени для планирования) |
+
 ## Переменные окружения
 
-| Переменная | Обязательна | Назначение |
-|---|---|---|
-| `PORT` | нет (3001) | HTTP-порт |
-| `JWT_SECRET` | да | Проверка access-токенов (общий с AuthService) |
-| `DATABASE_URL` | да | PostgreSQL |
-| `RABBITMQ_URL` | да | AMQP-подключение, очередь `user_events` |
-| `REDIS_HOST` / `REDIS_PORT` | нет (`localhost` / `6379`) | Кэш профиля |
+| Переменная                  | Обязательна                | Назначение                                                             |
+| --------------------------- | -------------------------- | ---------------------------------------------------------------------- |
+| `PORT`                      | нет (3001)                 | HTTP-порт                                                              |
+| `JWT_SECRET`                | да                         | Проверка access-токенов (общий с AuthService)                          |
+| `DATABASE_URL`              | да                         | PostgreSQL                                                             |
+| `RABBITMQ_URL`              | да                         | AMQP-подключение, очередь `user_events`                                |
+| `REDIS_HOST` / `REDIS_PORT` | нет (`localhost` / `6379`) | Кэш профиля                                                            |
+| `INTERNAL_API_KEY`          | да                         | Shared-secret для `UserInternal` gRPC-сервера (слушает `0.0.0.0:5003`) |
 
 ## Структура проекта
 

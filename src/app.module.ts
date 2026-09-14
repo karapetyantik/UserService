@@ -6,6 +6,7 @@ import { PrismaModule } from '@common/prisma/prisma.module';
 import { AuthModule } from '@common/auth/auth.module';
 import { RedisModule } from '@common/redis/redis.module';
 import { ProfileModule } from '@modules/profile/profile.module';
+import { GrpcInternalModule } from '@modules/profile/grpc-internal/grpc-user.module';
 
 @Module({
   imports: [
@@ -14,6 +15,7 @@ import { ProfileModule } from '@modules/profile/profile.module';
     ProfileModule,
     AuthModule,
     RedisModule,
+    GrpcInternalModule,
   ],
   controllers: [AppController],
   providers: [AppService],

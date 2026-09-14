@@ -88,6 +88,17 @@ export class ProfileService {
     return updated;
   }
 
+  async findManyByUserIds(userIds: string[]): Promise<Profile[]> {
+    const uniqueIds = [...new Set(userIds)].filter(Boolean);
+    if (uniqueIds.length === 0) {
+      return [];
+    }
+
+    return this.prismaService.profile.findMany({
+      where: { userId: { in: uniqueIds } },
+    });
+  }
+
   async updateAvatarUrl(userId: string, avatarUrl: string) {
     await this.prismaService.profile.update({
       where: { userId },

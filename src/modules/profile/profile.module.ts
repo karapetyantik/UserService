@@ -9,5 +9,6 @@ import { RedisModule } from '@common/redis/redis.module';
   imports: [PrismaModule, RedisModule],
   providers: [ProfileService],
   controllers: [ProfileController, ProfileEventsController],
+  exports: [ProfileService],
 })
 export class ProfileModule {}
