@@ -8,7 +8,7 @@ import { InternalGrpcAuthGuard } from './internal-grpc-auth.guard';
 export class GrpcUserController {
   constructor(private readonly profileService: ProfileService) {}
 
-  @GrpcMethod('UserInernal', 'GetProfiles')
+  @GrpcMethod('UserInternal', 'GetProfiles')
   async getProfiles(data: { userIds: string[] }) {
     const profiles = await this.profileService.findManyByUserIds(
       data.userIds ?? [],
