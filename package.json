@@ -82,10 +82,8 @@
       "^.+\\.(t|j)s$": "ts-jest"
     },
     "moduleNameMapper": {
-      "^@auth/(.*)$": "<rootDir>/auth/$1",
-      "^@redis/(.*)$": "<rootDir>/redis/$1",
-      "^@db/(.*)$": "<rootDir>/prisma/$1",
-      "^@profile/(.*)$": "<rootDir>/profile/$1"
+      "^@common/(.*)$": "<rootDir>/common/$1",
+      "^@modules/(.*)$": "<rootDir>/modules/$1"
     },
     "collectCoverageFrom": [
       "**/*.(t|j)s"

@@ -1,7 +1,7 @@
 import { Controller, UseGuards } from '@nestjs/common';
 import { GrpcMethod } from '@nestjs/microservices';
-import { ProfileService } from '@modules/profile/profile.service';
 import { InternalGrpcAuthGuard } from './internal-grpc-auth.guard';
+import { ProfileService } from '@modules/profile/profile.service';
 
 @UseGuards(InternalGrpcAuthGuard)
 @Controller()

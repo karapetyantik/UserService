@@ -27,7 +27,7 @@ async function bootstrap() {
     options: {
       package: 'user',
       protoPath: join(process.cwd(), 'dist/proto/user.proto'),
-      url: '0.0.0.0:5003',
+      url: configService.get<string>('USER_GRPC_URL', '0.0.0.0:5003'),
     },
   });
 

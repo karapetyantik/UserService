@@ -20,7 +20,7 @@ UserService не публикует событий сам — только по�
 - **PostgreSQL** через **Prisma**
 - **Redis** (ioredis) — read-through кэш профиля, TTL 300 секунд
 - **RabbitMQ** consumer, очередь `user_events`
-- Path-алиасы: `@auth/*`, `@redis/*`, `@db/*`, `@profile/*` (собственная плоская структура модулей, без общего `common/`)
+- Path-алиасы: `@common/*`, `@modules/*`
 
 ## Возможности
 
@@ -55,7 +55,7 @@ UserService не публикует событий сам — только по�
 | `user.registered` | AuthService  | Создаёт `Profile` (`userId`, `email`, `username`), если ещё не существует |
 | `avatar.updated`  | MediaService | Обновляет `avatarUrl` профиля, инвалидирует кэш                           |
 
-Оба обработчика валидируют payload через `class-validator` DTO и оборачивают вызов сервиса в `try/catch` — ошибка обработки одного события логируется, но не роняет consumer.
+Оба обработчика валидируют payload через `class-validator` DTO и оборачивают вызов сервиса в `try/catch` — ошибка обработки одного события логируется, но не роняет consumer. Если обработка не удалась (например транзиентный сбой БД), событие дополнительно публикуется в `USER_EVENTS_DLQ` (очередь `user_events_dlq`, `user_events.dead_letter`) — раньше такой сбой означал тихую потерю события навсегда (consumer всё равно ack'ает сообщение), и пользователь оставался без профиля молча.
 
 ## Внутренний gRPC-сервер: `UserInternal`
 
@@ -74,7 +74,8 @@ Proto: `src/proto/user.proto`. Защищён `InternalGrpcAuthGuard` — каж
 | `DATABASE_URL`              | да                         | PostgreSQL                                                             |
 | `RABBITMQ_URL`              | да                         | AMQP-подключение, очередь `user_events`                                |
 | `REDIS_HOST` / `REDIS_PORT` | нет (`localhost` / `6379`) | Кэш профиля                                                            |
-| `INTERNAL_API_KEY`          | да                         | Shared-secret для `UserInternal` gRPC-сервера (слушает `0.0.0.0:5003`) |
+| `INTERNAL_API_KEY`          | да                         | Shared-secret для `UserInternal` gRPC-сервера (сравнение константного времени) |
+| `USER_GRPC_URL`             | нет (`0.0.0.0:5003`)       | Адрес, на котором слушает `UserInternal` gRPC-сервер                   |
 
 ## Структура проекта
 
@@ -82,14 +83,17 @@ Proto: `src/proto/user.proto`. Защищён `InternalGrpcAuthGuard` — каж
 src/
 ├── main.ts
 ├── app.module.ts
-├── auth/      # JwtStrategy, JwtAuthGuard, AuthenticatedRequest
-├── prisma/    # PrismaService
-├── redis/     # RedisService
-└── profile/
-    ├── profile.controller.ts        # HTTP + user.registered consumer
-    ├── profile-events.controller.ts # avatar.updated consumer
-    ├── profile.service.ts
-    └── dto/                          # UpdateProfileDto, UserRegisteredEventDto, AvatarUpdatedEventDto
+├── common/
+│   ├── auth/      # JwtStrategy, JwtAuthGuard, AuthenticatedRequest
+│   ├── prisma/    # PrismaService
+│   └── redis/     # RedisService
+└── modules/
+    └── profile/
+        ├── profile.controller.ts        # HTTP
+        ├── profile-events.controller.ts # user.registered + avatar.updated consumers, DLQ on failure
+        ├── profile.service.ts
+        ├── grpc-internal/                # UserInternal сервер (GetProfiles) + guard
+        └── dto/                          # UpdateProfileDto, UserRegisteredEventDto, AvatarUpdatedEventDto
 ```
 
 ## Запуск
